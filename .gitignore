@@ -1,0 +1,43 @@
+# Large data files
+data/
+supertux_data.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model checkpoints and outputs
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+checkpoints/
+outputs/
+logs/
+runs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Tensorboard
+events.out.tfevents.*
+

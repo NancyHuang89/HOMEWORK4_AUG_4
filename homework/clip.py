@@ -101,14 +101,44 @@ class CLIP(nn.Module):
         super().__init__()
         self.vision_encoder = vision_encoder
         self.text_encoder = text_encoder
-        # TODO: implement the rest components
-        raise NotImplementedError("Not implemented")
+        self.temperature = temperature
+        
+        # Get the output dimensions of the encoders
+        # Vision encoder typically outputs from pooler or last hidden state
+        vision_output_dim = vision_encoder.config.hidden_size
+        # Text encoder typically outputs from pooler or last hidden state  
+        text_output_dim = text_encoder.config.hidden_size
+        
+        # Projection layers to map encoder outputs to a common space
+        self.vision_projection = nn.Linear(vision_output_dim, proj_dim)
+        self.text_projection = nn.Linear(text_output_dim, proj_dim)
 
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
-        return self.vision_encoder(image)
+        """Encode image and return pooled features."""
+        outputs = self.vision_encoder(pixel_values=image)
+        # Get pooled output (typically pooler_output or mean of last_hidden_state)
+        if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+            return outputs.pooler_output
+        else:
+            # Use mean pooling if no pooler
+            return outputs.last_hidden_state.mean(dim=1)
 
-    def encode_text(self, text: str) -> torch.Tensor:
-        return self.text_encoder(text)
+    def encode_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+        """Encode text and return pooled features."""
+        outputs = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
+        # Get pooled output (typically pooler_output or mean of last_hidden_state)
+        if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+            return outputs.pooler_output
+        else:
+            # Use attention-masked mean pooling if no pooler
+            if attention_mask is not None:
+                # Mask out padding tokens
+                mask_expanded = attention_mask.unsqueeze(-1).expand(outputs.last_hidden_state.size()).float()
+                sum_embeddings = torch.sum(outputs.last_hidden_state * mask_expanded, dim=1)
+                sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+                return sum_embeddings / sum_mask
+            else:
+                return outputs.last_hidden_state.mean(dim=1)
 
     def save_pretrained(self, save_directory: str, **kwargs):
         """Customize save method, save additional parameters"""
@@ -178,9 +208,24 @@ class CLIP(nn.Module):
             (NOTE: you don't need to use the variable `labels`, this is just for compatibility with the Trainer class)
             (Hint: refer to returned values of the __getitem__ method in the CaptionDatasetForTraining class)
         Returns:
-            TODO: think about the what values should be returned
+            Tuple of (vision_features, text_features, logits)
         """
-        raise NotImplementedError("Not implemented")
+        # Encode image and text
+        vision_features = self.encode_image(pixel_values)
+        text_features = self.encode_text(input_ids, attention_mask)
+        
+        # Project to common embedding space
+        vision_embeddings = self.vision_projection(vision_features)
+        text_embeddings = self.text_projection(text_features)
+        
+        # L2 normalize for cosine similarity
+        vision_embeddings = nn.functional.normalize(vision_embeddings, p=2, dim=1)
+        text_embeddings = nn.functional.normalize(text_embeddings, p=2, dim=1)
+        
+        # Compute logits (similarity matrix)
+        logits = torch.matmul(vision_embeddings, text_embeddings.T) / self.temperature
+        
+        return vision_embeddings, text_embeddings, logits
 
 
 def compute_clip_loss(
@@ -189,7 +234,7 @@ def compute_clip_loss(
     num_items_in_batch: int | None = None,
 ) -> torch.Tensor:
     """
-    Compute the loss for the CLIP model.
+    Compute the loss for the CLIP model using contrastive loss.
     Args:
         outputs: A tuple containing the outputs of CLIP.forward().
         labels: The labels for the text features.
@@ -199,7 +244,25 @@ def compute_clip_loss(
     Returns:
         The loss for the CLIP model.
     """
-    raise NotImplementedError("Not implemented")
+    vision_features, text_features, logits = outputs
+    
+    batch_size = vision_features.shape[0]
+    
+    # Create labels: diagonal elements are positive pairs (image i matches text i)
+    # We use identity matrix as targets since we assume matching pairs are aligned
+    targets = torch.arange(batch_size, device=logits.device)
+    
+    # Symmetric contrastive loss: image-to-text and text-to-image
+    # Image-to-text: for each image, find matching text
+    loss_i2t = nn.functional.cross_entropy(logits, targets)
+    
+    # Text-to-image: for each text, find matching image (transpose logits)
+    loss_t2i = nn.functional.cross_entropy(logits.T, targets)
+    
+    # Average both directions
+    loss = (loss_i2t + loss_t2i) / 2.0
+    
+    return loss
 
 
 def get_target_modules_for_lora(model: nn.Module) -> list[str]:
